@@ -70,7 +70,7 @@ check_docker() {
         echo "Install it: https://docs.docker.com/compose/install/"
         exit 1
     fi
-    echo "[ok] Docker $(docker --version | grep -oP '\d+\.\d+\.\d+')"
+    echo "[ok] Docker $(docker --version | sed 's/.*version \([0-9.]*\).*/\1/')"
     echo "[ok] $(docker compose version)"
 }
 
@@ -90,7 +90,7 @@ check_ports() {
     if [[ "$INSTALL_TYPE" == "server" ]]; then
         ports=(50051 50052 50061)
     fi
-    for port in "${ports[@]}"; do
+    for port in "${ports[@]+"${ports[@]}"}"; do
         if ss -tlnp 2>/dev/null | grep -q ":${port} " || \
            netstat -tlnp 2>/dev/null | grep -q ":${port} "; then
             echo "Error: Port $port is already in use."
