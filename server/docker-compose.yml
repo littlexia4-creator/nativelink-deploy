@@ -1,0 +1,34 @@
+# NativeLink CAS + Scheduler
+# Host networking — all ports bind directly to the host.
+# Ports: 50051 (CAS/AC/ByteStream), 50052 (Execution/Capabilities), 50061 (Worker API)
+
+services:
+  nativelink_local_cas:
+    image: ${NATIVELINK_SERVER_IMAGE:-ghcr.io/tracemachina/nativelink:rvpya7w878sm86gd028fgcz6j0prdj2y}
+    network_mode: host
+    volumes:
+      - ${NATIVELINK_DIR:-./.cache/nativelink}:/root/.cache/nativelink
+      - type: bind
+        source: .
+        target: /root
+    environment:
+      RUST_LOG: ${RUST_LOG:-warn}
+    entrypoint: |
+      nativelink /root/local-storage-cas.json5
+    restart: unless-stopped
+
+  nativelink_scheduler:
+    image: ${NATIVELINK_SERVER_IMAGE:-ghcr.io/tracemachina/nativelink:rvpya7w878sm86gd028fgcz6j0prdj2y}
+    network_mode: host
+    volumes:
+      - type: bind
+        source: .
+        target: /root
+    environment:
+      RUST_LOG: ${RUST_LOG:-warn}
+      CAS_ENDPOINT: 127.0.0.1
+    entrypoint: |
+      nativelink /root/scheduler.json5
+    depends_on:
+      - nativelink_local_cas
+    restart: unless-stopped

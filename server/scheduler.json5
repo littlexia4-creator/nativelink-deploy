@@ -1,0 +1,102 @@
+// NativeLink Scheduler
+// Proxies CAS/AC requests to the local CAS on port 50051.
+// Worker API on port 50061, Execution API on port 50052.
+{
+  stores: [
+    {
+      name: "GRPC_LOCAL_STORE",
+      grpc: {
+        instance_name: "",
+        endpoints: [
+          {
+            address: "grpc://${CAS_ENDPOINT:-127.0.0.1}:50051",
+          },
+        ],
+        store_type: "cas",
+      },
+    },
+    {
+      name: "GRPC_LOCAL_AC_STORE",
+      // Verifies that output files referenced in cached ActionResults
+      // still exist in the CAS before returning a hit. Without this,
+      // evicted CAS objects cause stale AC hits and NOT_FOUND errors.
+      completeness_checking: {
+        backend: {
+          grpc: {
+            instance_name: "",
+            endpoints: [
+              {
+                address: "grpc://${CAS_ENDPOINT:-127.0.0.1}:50051",
+              },
+            ],
+            store_type: "ac",
+          },
+        },
+        cas_store: {
+          ref_store: {
+            name: "GRPC_LOCAL_STORE",
+          },
+        },
+      },
+    },
+  ],
+  schedulers: [
+    {
+      name: "MAIN_SCHEDULER",
+      simple: {
+        supported_platform_properties: {
+          cpu_count: "minimum",
+          OSFamily: "priority",
+          "container-image": "priority",
+          "lre-rs": "priority",
+          ISA: "exact",
+          InputRootAbsolutePath: "ignore"
+        },
+        // Heartbeat timeout. Increase for high-latency or heavily loaded workers.
+        worker_timeout_s: 60,
+      },
+    },
+  ],
+  servers: [
+    {
+      listener: {
+        http: {
+          socket_address: "0.0.0.0:50052",
+        },
+      },
+      services: {
+        ac: [
+          {
+            ac_store: "GRPC_LOCAL_AC_STORE",
+          },
+        ],
+        execution: [
+          {
+            cas_store: "GRPC_LOCAL_STORE",
+            scheduler: "MAIN_SCHEDULER",
+          },
+        ],
+        capabilities: [
+          {
+            remote_execution: {
+              scheduler: "MAIN_SCHEDULER",
+            },
+          },
+        ],
+      },
+    },
+    {
+      listener: {
+        http: {
+          socket_address: "0.0.0.0:50061",
+        },
+      },
+      services: {
+        worker_api: {
+          scheduler: "MAIN_SCHEDULER",
+        },
+        health: [],
+      },
+    },
+  ],
+}

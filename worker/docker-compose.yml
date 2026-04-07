@@ -1,0 +1,18 @@
+# NativeLink Worker
+# Host networking — connects to remote CAS + Scheduler via IP.
+
+services:
+  nativelink_executor:
+    image: ${NATIVELINK_WORKER_IMAGE:-xiayuqiang/nativelink-ubuntu}
+    network_mode: host
+    volumes:
+      - ${NATIVELINK_DIR:-./.cache/nativelink}:/root/.cache/nativelink
+      - type: bind
+        source: .
+        target: /root
+    environment:
+      RUST_LOG: ${RUST_LOG:-warn}
+      CAS_ENDPOINT: ${CAS_ENDPOINT:-127.0.0.1}
+      SCHEDULER_ENDPOINT: ${SCHEDULER_ENDPOINT:-127.0.0.1}
+    entrypoint: ["nativelink", "/root/worker.json5"]
+    restart: unless-stopped
