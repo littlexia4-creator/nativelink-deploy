@@ -12,7 +12,7 @@
 #   DEPLOY_DIR        Install directory (default: ~/nativelink-server or ~/nativelink-worker)
 #   CAS_MAX_GB        CAS store size in GB (default: 500, server only)
 #   AC_MAX_GB         AC store size in GB (default: 10, server only)
-#   WORKER_CACHE_GB   Worker local cache in GB (default: 30, worker only)
+#   WORKER_CACHE_GB   Worker local cache in GB (default: 50, worker only)
 #   MAX_TASKS         Max concurrent tasks (default: auto-detect via nproc, worker only)
 #   RUST_LOG          Log level (default: warn)
 
@@ -146,7 +146,8 @@ apply_server_config() {
 
 apply_worker_config() {
     local cache_bytes max_tasks
-    cache_bytes=$(( ${WORKER_CACHE_GB:-30} * 1000000000 ))
+    local worker_cache_gb="${WORKER_CACHE_GB:-50}"
+    cache_bytes=$(( ${worker_cache_gb} * 1000000000 ))
     max_tasks="${MAX_TASKS:-$(nproc 2>/dev/null || echo 4)}"
 
     # Worker local cache size
@@ -154,7 +155,7 @@ apply_worker_config() {
     # Max concurrent tasks
     sed -i "s/max_inflight_tasks: 32/max_inflight_tasks: ${max_tasks}/" worker.json5
 
-    echo "[ok] Worker cache: ${WORKER_CACHE_GB:-30} GB, max tasks: $max_tasks"
+    echo "[ok] Worker cache: ${worker_cache_gb} GB, max tasks: $max_tasks"
 }
 
 if [[ "$INSTALL_TYPE" == "server" ]]; then
