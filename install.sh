@@ -9,7 +9,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/littlexia4-creator/nativelink-deploy/main/install.sh | bash -s -- worker <SERVER_IP>
 #
 # Options (via environment variables):
-#   DEPLOY_DIR        Install directory (default: /opt/nativelink)
+#   DEPLOY_DIR        Install directory (default: ~/nativelink-server or ~/nativelink-worker)
 #   CAS_MAX_GB        CAS store size in GB (default: 500, server only)
 #   AC_MAX_GB         AC store size in GB (default: 10, server only)
 #   WORKER_CACHE_GB   Worker local cache in GB (default: 30, worker only)
@@ -20,8 +20,6 @@ set -euo pipefail
 
 # ── Constants ──────────────────────────────────────────────────────────────
 REPO_BASE="https://raw.githubusercontent.com/littlexia4-creator/nativelink-deploy/main"
-DEPLOY_DIR="${DEPLOY_DIR:-/opt/nativelink}"
-
 # ── Parse arguments ────────────────────────────────────────────────────────
 usage() {
     cat <<'EOF'
@@ -30,7 +28,7 @@ Usage:
   install.sh worker <SERVER_IP>        Deploy worker connecting to SERVER_IP
 
 Environment variables:
-  DEPLOY_DIR=<path>        Install directory (default: /opt/nativelink)
+  DEPLOY_DIR=<path>        Install directory (default: ~/nativelink-server or ~/nativelink-worker)
   CAS_MAX_GB=<num>         CAS store max size in GB (default: 500)
   AC_MAX_GB=<num>          AC store max size in GB (default: 10)
   WORKER_CACHE_GB=<num>    Worker local cache in GB (default: 30)
@@ -57,6 +55,8 @@ if [[ "$INSTALL_TYPE" == "worker" && -z "$SERVER_IP" ]]; then
     echo "  install.sh worker <SERVER_IP>"
     exit 1
 fi
+
+DEPLOY_DIR="${DEPLOY_DIR:-~/nativelink-${INSTALL_TYPE}}"
 
 # ── Preflight checks ──────────────────────────────────────────────────────
 check_docker() {

@@ -43,12 +43,12 @@ CAS_MAX_GB=200 AC_MAX_GB=5 curl -fsSL .../install.sh | bash -s -- server
 WORKER_CACHE_GB=50 MAX_TASKS=16 curl -fsSL .../install.sh | bash -s -- worker 10.0.0.1
 
 # Custom install directory
-DEPLOY_DIR=/home/nativelink curl -fsSL .../install.sh | bash -s -- server
+DEPLOY_DIR=~/nativelink curl -fsSL .../install.sh | bash -s -- server
 ```
 
 | Variable | Default | Applies to | Description |
 |----------|---------|------------|-------------|
-| `DEPLOY_DIR` | `/opt/nativelink` | both | Install directory |
+| `DEPLOY_DIR` | `~/nativelink-server` or `~/nativelink-worker` | both | Install directory |
 | `CAS_MAX_GB` | `500` | server | CAS store max size (GB) |
 | `AC_MAX_GB` | `10` | server | Action Cache max size (GB) |
 | `WORKER_CACHE_GB` | `30` | worker | Worker local cache (GB) |
