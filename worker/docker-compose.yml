@@ -3,7 +3,7 @@
 
 services:
   nativelink_executor:
-    image: ${NATIVELINK_WORKER_IMAGE:-xiayuqiang/nativelink-ubuntu}
+    image: ${NATIVELINK_WORKER_IMAGE:-ghcr.io/littlexia4-creator/nativelink-ubuntu}
     network_mode: host
     volumes:
       - ${NATIVELINK_DIR:-./.cache/nativelink}:/root/.cache/nativelink

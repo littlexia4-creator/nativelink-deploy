@@ -4,7 +4,7 @@
 
 services:
   nativelink_local_cas:
-    image: ${NATIVELINK_SERVER_IMAGE:-ghcr.io/tracemachina/nativelink:rvpya7w878sm86gd028fgcz6j0prdj2y}
+    image: ${NATIVELINK_SERVER_IMAGE:-ghcr.io/tracemachina/nativelink:v1.0.0}
     network_mode: host
     volumes:
       - ${NATIVELINK_DIR:-./.cache/nativelink}:/root/.cache/nativelink
@@ -18,7 +18,7 @@ services:
     restart: unless-stopped
 
   nativelink_scheduler:
-    image: ${NATIVELINK_SERVER_IMAGE:-ghcr.io/tracemachina/nativelink:rvpya7w878sm86gd028fgcz6j0prdj2y}
+    image: ${NATIVELINK_SERVER_IMAGE:-ghcr.io/tracemachina/nativelink:v1.0.0}
     network_mode: host
     volumes:
       - type: bind
