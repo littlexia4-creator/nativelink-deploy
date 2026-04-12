@@ -115,10 +115,56 @@ echo "Installing to: $DEPLOY_DIR"
 mkdir -p "$DEPLOY_DIR"
 cd "$DEPLOY_DIR"
 
+github_raw_to_jsdelivr() {
+  local url="$1"
+  local owner repo branch file_path
+  local CDN_BASE="https://cdn.jsdelivr.net/gh"
+
+  # Check if the URL is from raw.githubusercontent.com
+  if [[ $url =~ ^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$ ]]; then
+    owner="${BASH_REMATCH[1]}"
+    repo="${BASH_REMATCH[2]}"
+    branch="${BASH_REMATCH[3]}"
+    file_path="${BASH_REMATCH[4]}" # This captures the full path including subdirectories
+
+    # Construct the jsDelivr URL
+    echo "$CDN_BASE/${owner}/${repo}@${branch}/${file_path}"
+  else
+    # If the URL doesn't match, return the original (or handle error)
+    return 1
+  fi
+}
+
+github_raw_to_proxy() {
+  local raw_url="$1"
+  local PROXY_BASE="https://ghproxy.net/"
+
+  # Check if an input URL was provided
+  if [[ -z "$raw_url" ]]; then
+    echo "Error: No GitHub Raw URL provided"
+    return 1
+  fi
+
+  # Validate that the URL starts with the expected GitHub Raw format
+  if [[ $raw_url =~ ^https://raw\.githubusercontent\.com/.+ ]]; then
+    # Construct the proxied URL
+    local proxied_url="${PROXY_BASE}${raw_url}"
+    echo "$proxied_url"
+  else
+    echo "Error: Provided URL is not in a valid GitHub Raw URL format: $raw_url"
+    return 1
+  fi
+}
+
 download() {
     local url="$1" dest="$2"
     echo "  Downloading $dest ..."
-    curl -fsSL "$url" -o "$dest"
+    converted_url=$(github_raw_to_jsdelivr "$url")
+    if [[ -z "$converted_url" ]]; then
+      converted_url=$(github_raw_to_proxy "$url")
+    fi
+    echo "  Using URL: $converted_url"
+    curl -fsSL "$converted_url" -o "$dest"
 }
 
 if [[ "$INSTALL_TYPE" == "server" ]]; then
@@ -243,7 +289,7 @@ if [[ "$INSTALL_TYPE" == "server" ]]; then
     echo "  50052  Execution / Capabilities"
     echo "  50061  Worker API (for remote workers)"
     echo ""
-    echo "To add a worker on another server:"
+    echo "To add a worker on another machine:"
     echo "  curl -fsSL $REPO_BASE/install.sh | bash -s -- worker $local_ip"
 else
     echo "Worker is connecting to: $SERVER_IP"
