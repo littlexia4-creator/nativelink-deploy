@@ -56,8 +56,6 @@ if [[ "$INSTALL_TYPE" == "worker" && -z "$SERVER_IP" ]]; then
     exit 1
 fi
 
-DEPLOY_DIR="${DEPLOY_DIR:-~/nativelink-${INSTALL_TYPE}}"
-
 # ── Preflight checks ──────────────────────────────────────────────────────
 check_docker() {
     if ! command -v docker &>/dev/null; then
@@ -110,11 +108,6 @@ check_arch
 check_ports
 
 # ── Download configs ───────────────────────────────────────────────────────
-echo ""
-echo "Installing to: $DEPLOY_DIR"
-mkdir -p "$DEPLOY_DIR"
-cd "$DEPLOY_DIR"
-
 github_raw_to_jsdelivr() {
   local url="$1"
   local owner repo branch file_path
@@ -159,13 +152,32 @@ github_raw_to_proxy() {
 download() {
     local url="$1" dest="$2"
     echo "  Downloading $dest ..."
-    converted_url=$(github_raw_to_jsdelivr "$url")
+    converted_url=$(github_raw_to_proxy "$url")
     if [[ -z "$converted_url" ]]; then
-      converted_url=$(github_raw_to_proxy "$url")
+      converted_url=$(github_raw_to_jsdelivr "$url")
+    fi
+
+    if [[ -z "$converted_url" ]]; then
+      echo "Error: Unable to convert URL: $url"
+      return 1
     fi
     echo "  Using URL: $converted_url"
     curl -fsSL "$converted_url" -o "$dest"
 }
+
+DEFAULT_DEPLOY_DIR_NAME="nativelink-${INSTALL_TYPE}"
+DEPLOY_DIR="${DEPLOY_DIR:-~/$DEFAULT_DEPLOY_DIR_NAME}"
+
+echo ""
+echo "Installing to: $DEPLOY_DIR"
+if [[ "$DEPLOY_DIR" == ~* ]]; then
+    cd ~
+    mkdir -p "$DEFAULT_DEPLOY_DIR_NAME"
+    cd "$DEFAULT_DEPLOY_DIR_NAME"
+else
+    mkdir -p "$DEPLOY_DIR"
+    cd "$DEPLOY_DIR"
+fi
 
 if [[ "$INSTALL_TYPE" == "server" ]]; then
     download "$REPO_BASE/server/docker-compose.yml"     "docker-compose.yml"
@@ -268,14 +280,13 @@ chmod +x status.sh
 # ── Start ──────────────────────────────────────────────────────────────────
 echo ""
 echo "Starting NativeLink ($INSTALL_TYPE)..."
-docker compose up -d
+sudo docker compose up -d
 
 echo ""
 echo "=== Installation Complete ==="
 echo ""
 echo "Deploy directory: $DEPLOY_DIR"
 echo "Management commands:"
-echo "  cd $DEPLOY_DIR"
 echo "  ./start.sh     Start services"
 echo "  ./stop.sh      Stop services"
 echo "  ./logs.sh      Follow logs"
