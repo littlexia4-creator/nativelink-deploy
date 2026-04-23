@@ -4,7 +4,7 @@
 
 services:
   nativelink_local_cas:
-    image: ${NATIVELINK_SERVER_IMAGE:-ghcr.io/tracemachina/nativelink:v1.0.0}
+    image: ${NATIVELINK_SERVER_IMAGE:-ghcr.io/tracemachina/nativelink:bl96kxfvkbmyl5zr9bxgsfxb7nnyr1l2}
     network_mode: host
     volumes:
       - ${NATIVELINK_DIR:-./.cache/nativelink}:/root/.cache/nativelink
