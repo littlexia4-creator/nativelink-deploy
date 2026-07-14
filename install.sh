@@ -179,6 +179,46 @@ else
     cd "$DEPLOY_DIR"
 fi
 
+# ── Disk budget preflight ──────────────────────────────────────────────────
+# NativeLink stages every CAS write in tmp_path-cas and renames it into
+# content_path-cas, and eviction only counts content_path. If the configured
+# quota does not fit this disk (with headroom for that staging), the disk
+# fills before eviction ever fires and every write fails at runtime with
+# "No space left on device". Refuse such configs at install time.
+require_int() {
+    case "$2" in
+        ''|*[!0-9]*)
+            echo "Error: $1 must be a positive integer (got: '$2')"
+            exit 1
+            ;;
+    esac
+}
+
+check_disk_budget() {
+    local need_gb="$1" what="$2"
+    local avail_kb avail_gb budget_gb
+    avail_kb=$(df -Pk . | awk 'NR==2 {print $4}')
+    avail_gb=$(( avail_kb / 1024 / 1024 ))
+    budget_gb=$(( avail_gb * 85 / 100 ))
+    if (( need_gb > budget_gb )); then
+        echo "Error: $what (${need_gb} GB) exceeds 85% of the free space on this disk."
+        echo "  Deploy dir: $PWD"
+        echo "  Free space: ${avail_gb} GB (85% budget: ${budget_gb} GB)"
+        echo "Lower CAS_MAX_GB / AC_MAX_GB / WORKER_CACHE_GB, or point DEPLOY_DIR at a bigger disk."
+        exit 1
+    fi
+    echo "[ok] $what: ${need_gb} GB fits disk budget (${avail_gb} GB free, 85% budget: ${budget_gb} GB)"
+}
+
+if [[ "$INSTALL_TYPE" == "server" ]]; then
+    require_int CAS_MAX_GB "${CAS_MAX_GB:-500}"
+    require_int AC_MAX_GB "${AC_MAX_GB:-10}"
+    check_disk_budget "$(( ${CAS_MAX_GB:-500} + ${AC_MAX_GB:-10} ))" "CAS+AC store quota"
+else
+    require_int WORKER_CACHE_GB "${WORKER_CACHE_GB:-50}"
+    check_disk_budget "${WORKER_CACHE_GB:-50}" "worker cache quota"
+fi
+
 if [[ "$INSTALL_TYPE" == "server" ]]; then
     download "$REPO_BASE/server/docker-compose.yml"     "docker-compose.yml"
     download "$REPO_BASE/server/local-storage-cas.json5" "local-storage-cas.json5"
