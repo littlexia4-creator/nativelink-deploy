@@ -56,6 +56,12 @@ if [[ "$INSTALL_TYPE" == "worker" && -z "$SERVER_IP" ]]; then
     exit 1
 fi
 
+if [[ $EUID -ne 0 ]]; then
+    echo "Error: run as root — the installer creates and mounts an XFS store."
+    echo "  sudo bash install.sh $*"
+    exit 1
+fi
+
 # ── Preflight checks ──────────────────────────────────────────────────────
 check_docker() {
     if ! command -v docker &>/dev/null; then
@@ -179,12 +185,20 @@ else
     cd "$DEPLOY_DIR"
 fi
 
-# ── Disk budget preflight ──────────────────────────────────────────────────
-# NativeLink stages every CAS write in tmp_path-cas and renames it into
-# content_path-cas, and eviction only counts content_path. If the configured
-# quota does not fit this disk (with headroom for that staging), the disk
-# fills before eviction ever fires and every write fails at runtime with
-# "No space left on device". Refuse such configs at install time.
+# ── XFS store setup ──────────────────────────────────────────────────────
+# Why XFS: NativeLink's filesystem store puts ALL blobs into ONE directory
+# (content_path-cas/d/). ext4 caps a single directory at ~8-10M entries
+# (htree depth 2 without large_dir); a 100+ GB CAS quota exceeds that and
+# writes fail with ENOSPC despite plenty of free space. XFS has no
+# practical per-directory limit.
+#
+# Why a loop file: most hosts have no spare disk; one loop file is a single
+# entry in the host directory, and XFS inside it holds the millions of blobs.
+#
+# CRITICAL: the backing file must be PREALLOCATED (fallocate, not truncate).
+# A sparse loop allocates backing extents on first write, which collapsed
+# fsync throughput from ~225 MB/s to ~55 MB/s in production and stalled
+# worker output uploads at 28-39 s per action.
 require_int() {
     case "$2" in
         ''|*[!0-9]*)
@@ -194,29 +208,78 @@ require_int() {
     esac
 }
 
-check_disk_budget() {
-    local need_gb="$1" what="$2"
-    local avail_kb avail_gb budget_gb
-    avail_kb=$(df -Pk . | awk 'NR==2 {print $4}')
+ensure_xfsprogs() {
+    if command -v mkfs.xfs &>/dev/null; then
+        echo "[ok] mkfs.xfs available"
+        return
+    fi
+    echo "Installing xfsprogs ..."
+    if command -v apt-get &>/dev/null; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y xfsprogs
+    elif command -v dnf &>/dev/null; then
+        dnf install -y xfsprogs
+    elif command -v yum &>/dev/null; then
+        yum install -y xfsprogs
+    else
+        echo "Error: no package manager found to install xfsprogs."
+        exit 1
+    fi
+    command -v mkfs.xfs &>/dev/null || { echo "Error: xfsprogs install failed"; exit 1; }
+}
+
+setup_xfs_store() {
+    # $1 = store quota GB, $2 = extra headroom GB (staging/work scratch)
+    local quota_gb=$1 headroom_gb=${2:-0}
+    # +10% for temp-path staging and fs metadata.
+    local loop_gb=$(( (quota_gb + headroom_gb) * 110 / 100 + 1 ))
+    local img="$DEPLOY_DIR/cas-store.img"
+    local mnt="$DEPLOY_DIR/store"
+
+    NATIVELINK_DIR="$mnt"
+
+    # Idempotent: already set up and mounted?
+    if [[ -f "$img" ]] && mountpoint -q "$mnt" 2>/dev/null \
+       && [[ "$(df -T "$mnt" | awk 'NR==2 {print $2}')" == "xfs" ]]; then
+        echo "[ok] XFS store already mounted at $mnt"
+        return
+    fi
+
+    ensure_xfsprogs
+
+    # fallocate reserves the full loop size up front — check the disk fits it.
+    local avail_kb avail_gb
+    avail_kb=$(df -Pk "$DEPLOY_DIR" | awk 'NR==2 {print $4}')
     avail_gb=$(( avail_kb / 1024 / 1024 ))
-    budget_gb=$(( avail_gb * 85 / 100 ))
-    if (( need_gb > budget_gb )); then
-        echo "Error: $what (${need_gb} GB) exceeds 85% of the free space on this disk."
+    if (( loop_gb + 10 > avail_gb )); then
+        echo "Error: XFS loop needs ${loop_gb} GB (+10 GB margin) but only ${avail_gb} GB free."
         echo "  Deploy dir: $PWD"
-        echo "  Free space: ${avail_gb} GB (85% budget: ${budget_gb} GB)"
         echo "Lower CAS_MAX_GB / AC_MAX_GB / WORKER_CACHE_GB, or point DEPLOY_DIR at a bigger disk."
         exit 1
     fi
-    echo "[ok] $what: ${need_gb} GB fits disk budget (${avail_gb} GB free, 85% budget: ${budget_gb} GB)"
+    echo "[ok] Disk budget: ${loop_gb} GB loop fits (${avail_gb} GB free)"
+
+    echo "Creating ${loop_gb} GB preallocated XFS loop ..."
+    fallocate -l "${loop_gb}G" "$img"
+    local lo
+    lo=$(losetup -f --show "$img")
+    mkfs.xfs -f "$lo" >/dev/null
+    mkdir -p "$mnt"
+    mount "$lo" "$mnt"
+    if ! grep -qsF "$img" /etc/fstab; then
+        echo "$img $mnt xfs loop,nofail 0 0" >> /etc/fstab
+        echo "[ok] fstab entry added (loop,nofail)"
+    fi
+    echo "[ok] XFS store mounted: $mnt ($(df -h "$mnt" | awk 'NR==2 {print $2}') total)"
 }
 
 if [[ "$INSTALL_TYPE" == "server" ]]; then
     require_int CAS_MAX_GB "${CAS_MAX_GB:-500}"
     require_int AC_MAX_GB "${AC_MAX_GB:-10}"
-    check_disk_budget "$(( ${CAS_MAX_GB:-500} + ${AC_MAX_GB:-10} ))" "CAS+AC store quota"
+    setup_xfs_store "$(( ${CAS_MAX_GB:-500} + ${AC_MAX_GB:-10} ))" 0
 else
     require_int WORKER_CACHE_GB "${WORKER_CACHE_GB:-50}"
-    check_disk_budget "${WORKER_CACHE_GB:-50}" "worker cache quota"
+    # +20 GB for the action work_directory scratch.
+    setup_xfs_store "${WORKER_CACHE_GB:-50}" 20
 fi
 
 if [[ "$INSTALL_TYPE" == "server" ]]; then
@@ -266,6 +329,7 @@ fi
 create_env() {
     cat > .env <<ENVEOF
 RUST_LOG=${RUST_LOG:-warn}
+NATIVELINK_DIR=${NATIVELINK_DIR}
 ENVEOF
 
     if [[ "$INSTALL_TYPE" == "worker" ]]; then
@@ -312,15 +376,36 @@ echo ""
 echo "=== Resource Usage ==="
 docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" $(docker compose ps -q 2>/dev/null) 2>/dev/null || true
 echo ""
-echo "=== Cache Disk Usage ==="
-du -sh .cache/nativelink/*/ 2>/dev/null || echo "(no cache data yet)"
+echo "=== Store ==="
+store_dir=$(sed -n 's/^NATIVELINK_DIR=//p' .env 2>/dev/null)
+store_dir=${store_dir:-./.cache/nativelink}
+if ! mountpoint -q "$store_dir" 2>/dev/null; then
+    echo "WARNING: $store_dir is NOT mounted (loop not attached after reboot?)."
+    echo "  Fix: sudo mount $store_dir   (fstab entry: cas-store.img ... loop,nofail)"
+fi
+df -hT "$store_dir" 2>/dev/null | tail -1
+fstype=$(df -T "$store_dir" 2>/dev/null | awk 'NR==2 {print $2}')
+if [[ -n "$fstype" && "$fstype" != "xfs" ]]; then
+    echo "WARNING: store on '$fstype'. ext4 limits ONE directory to ~8-10M files;"
+    echo "  NativeLink keeps all blobs in content_path-cas/d — use XFS (see install.sh)."
+fi
+# The failure mode block/inode checks miss: per-directory entry count.
+for d in content_path-cas/d data-worker-test/content_path-cas; do
+    dir="$store_dir/$d"
+    [[ -d "$dir" ]] || continue
+    n=$(ls -f "$dir" 2>/dev/null | wc -l)
+    echo "$d: $n entries"
+    if (( n > 6000000 )) && [[ "$fstype" != "xfs" ]]; then
+        echo "WARNING: >6M entries in one $fstype directory — writes will start failing with ENOSPC."
+    fi
+done
 SCRIPT
 chmod +x status.sh
 
 # ── Start ──────────────────────────────────────────────────────────────────
 echo ""
 echo "Starting NativeLink ($INSTALL_TYPE)..."
-sudo docker compose up -d
+docker compose up -d
 
 echo ""
 echo "=== Installation Complete ==="
