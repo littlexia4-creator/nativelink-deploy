@@ -4,15 +4,24 @@ One-command deployment of [NativeLink](https://github.com/TraceMachina/nativelin
 
 ## Quick Start
 
-The installer needs **root** (it creates and mounts an XFS store).
+The installer needs **root** (cas/worker modes create and mount an XFS store).
 
-### Deploy Server (CAS + Scheduler)
+### Deploy CAS
 
-On the main Linux server:
+On the Linux host that will store build artifacts:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/littlexia4-creator/nativelink-deploy/main/install.sh -o /tmp/nativelink-install.sh
-sudo bash /tmp/nativelink-install.sh server
+sudo bash /tmp/nativelink-install.sh cas
+```
+
+### Deploy Scheduler
+
+On the same or another Linux host (replace `<CAS_IP>` with the CAS host's IP):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/littlexia4-creator/nativelink-deploy/main/install.sh -o /tmp/nativelink-install.sh
+sudo bash /tmp/nativelink-install.sh scheduler <CAS_IP>
 ```
 
 ### Deploy Worker
@@ -21,10 +30,10 @@ On any additional Linux server:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/littlexia4-creator/nativelink-deploy/main/install.sh -o /tmp/nativelink-install.sh
-sudo bash /tmp/nativelink-install.sh worker <SERVER_IP>
+sudo bash /tmp/nativelink-install.sh worker <CAS_IP> [SCHEDULER_IP]
 ```
 
-Replace `<SERVER_IP>` with the IP of the server running CAS + Scheduler.
+`SCHEDULER_IP` defaults to `CAS_IP` (for co-located CAS + scheduler setups).
 
 ## Requirements
 
@@ -33,7 +42,7 @@ Replace `<SERVER_IP>` with the IP of the server running CAS + Scheduler.
 | OS | x86_64 Linux |
 | Root | Installer mounts an XFS store and edits `/etc/fstab` |
 | Docker | Docker Engine + Compose v2 |
-| Network | TCP access to server ports 50051, 50061 (worker only) |
+| Network | TCP access to CAS port 50051 and scheduler port 50061 (scheduler/worker only) |
 | Disk | Free space ≥ store quota × 1.1 + 10 GB (the XFS loop file is **preallocated** up front) |
 
 ## Configuration
@@ -41,31 +50,32 @@ Replace `<SERVER_IP>` with the IP of the server running CAS + Scheduler.
 Pass environment variables to the install command:
 
 ```bash
-# Server with custom store sizes
-sudo CAS_MAX_GB=200 AC_MAX_GB=5 bash /tmp/nativelink-install.sh server
+# CAS with custom store sizes
+sudo CAS_MAX_GB=200 AC_MAX_GB=5 bash /tmp/nativelink-install.sh cas
 
 # Worker with custom cache and task limit
 sudo WORKER_CACHE_GB=50 MAX_TASKS=16 bash /tmp/nativelink-install.sh worker 10.0.0.1
 
 # Custom install directory
-sudo DEPLOY_DIR=/data/nativelink bash /tmp/nativelink-install.sh server
+sudo DEPLOY_DIR=/data/nativelink bash /tmp/nativelink-install.sh cas
 ```
 
 | Variable | Default | Applies to | Description |
 |----------|---------|------------|-------------|
-| `DEPLOY_DIR` | `~/nativelink-server` or `~/nativelink-worker` | both | Install directory |
-| `CAS_MAX_GB` | `500` | server | CAS store max size (GB) |
-| `AC_MAX_GB` | `10` | server | Action Cache max size (GB) |
+| `DEPLOY_DIR` | `~/nativelink-<type>` | all | Install directory |
+| `CAS_MAX_GB` | `500` | cas | CAS store max size (GB) |
+| `AC_MAX_GB` | `10` | cas | Action Cache max size (GB) |
 | `WORKER_CACHE_GB` | `50` | worker | Worker local cache (GB) |
 | `MAX_TASKS` | auto (`nproc`) | worker | Max concurrent compile tasks |
-| `RUST_LOG` | `warn` | both | Log level: error, warn, info, debug |
+| `RUST_LOG` | `warn` | all | Log level: error, warn, info, debug |
 
 ## Storage design (XFS)
 
-The installer puts the cache on an **XFS filesystem inside a preallocated
-loop file** (`$DEPLOY_DIR/cas-store.img`, mounted at `$DEPLOY_DIR/store`,
-persisted in `/etc/fstab` with `loop,nofail`). Do not point the store at a
-plain ext4 directory. Two production incidents motivate this:
+For cas and worker, the installer puts the cache on an **XFS filesystem
+inside a preallocated loop file** (`$DEPLOY_DIR/cas-store.img`, mounted at
+`$DEPLOY_DIR/store`, persisted in `/etc/fstab` with `loop,nofail`). The
+scheduler holds no persistent data and needs no store. Do not point the
+store at a plain ext4 directory. Two production incidents motivate this:
 
 1. **ext4 per-directory limit.** NativeLink's filesystem store keeps ALL
    blobs in one directory (`content_path-cas/d/`). ext4's htree caps a
@@ -99,22 +109,23 @@ cd /opt/nativelink    # or your DEPLOY_DIR
 
 ```
 Mac (reproxy)
-  +--> :50051 -----> CAS        (server)
-  +--> :50052 -----> Scheduler  (server)
+  +--> :50051 -----> CAS        (cas host)
+  +--> :50052 -----> Scheduler  (scheduler host) -- :50051 --> CAS
                         |
-                        +--> :50061 <-- Worker A (server, local)
-                        +--> :50061 <-- Worker B (remote server 1)
-                        +--> :50061 <-- Worker C (remote server 2)
+                        +--> :50061 <-- Worker A (local)
+                        +--> :50061 <-- Worker B (remote host 1)
+                        +--> :50061 <-- Worker C (remote host 2)
 ```
 
-- **Server** runs CAS + Scheduler. One per cluster.
-- **Workers** connect to the server. One per machine, `max_inflight_tasks` = CPU count.
+- **CAS** stores all blobs and action results. One per cluster.
+- **Scheduler** dispatches actions and proxies CAS/AC to the CAS host. One per cluster; can run on the CAS host or its own host.
+- **Workers** connect to both CAS (50051) and the scheduler (50061). One per machine, `max_inflight_tasks` = CPU count.
 - All components use host networking (`network_mode: host`).
 
 ## Ports
 
 | Port | Service | Direction |
 |------|---------|-----------|
-| 50051 | CAS / AC / ByteStream | Mac -> Server, Worker -> Server |
-| 50052 | Execution / Capabilities | Mac -> Server |
-| 50061 | Worker API | Worker -> Server |
+| 50051 | CAS / AC / ByteStream | Mac -> CAS, Scheduler -> CAS, Worker -> CAS |
+| 50052 | Execution / Capabilities | Mac -> Scheduler |
+| 50061 | Worker API | Worker -> Scheduler |

@@ -1,0 +1,17 @@
+# NativeLink CAS + AC store
+# Host networking — port 50051 (CAS/AC/ByteStream).
+
+services:
+  nativelink_local_cas:
+    image: ${NATIVELINK_SERVER_IMAGE:-ghcr.io/tracemachina/nativelink:2026-06-24-c72bce8533913c70d121c0798f4c6d07ce78537a}
+    network_mode: host
+    volumes:
+      - ${NATIVELINK_DIR:-./.cache/nativelink}:/root/.cache/nativelink
+      - type: bind
+        source: .
+        target: /root
+    environment:
+      RUST_LOG: ${RUST_LOG:-warn}
+    entrypoint: |
+      nativelink /root/local-storage-cas.json5
+    restart: unless-stopped

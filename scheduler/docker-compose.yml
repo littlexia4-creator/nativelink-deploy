@@ -1,0 +1,18 @@
+# NativeLink Scheduler
+# Host networking — port 50052 (Execution/Capabilities), 50061 (Worker API).
+# Proxies CAS/AC requests to the CAS host at CAS_ENDPOINT:50051.
+
+services:
+  nativelink_scheduler:
+    image: ${NATIVELINK_SERVER_IMAGE:-ghcr.io/tracemachina/nativelink:2026-06-24-c72bce8533913c70d121c0798f4c6d07ce78537a}
+    network_mode: host
+    volumes:
+      - type: bind
+        source: .
+        target: /root
+    environment:
+      RUST_LOG: ${RUST_LOG:-warn}
+      CAS_ENDPOINT: ${CAS_ENDPOINT:-127.0.0.1}
+    entrypoint: |
+      nativelink /root/scheduler.json5
+    restart: unless-stopped

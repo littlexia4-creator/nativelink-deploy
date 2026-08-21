@@ -2,16 +2,19 @@
 # NativeLink one-command installer
 #
 # Usage:
-#   # Deploy CAS + Scheduler (the "server")
-#   curl -fsSL https://raw.githubusercontent.com/littlexia4-creator/nativelink-deploy/main/install.sh | bash -s -- server
+#   # Deploy CAS (content-addressable + action cache store)
+#   curl -fsSL https://raw.githubusercontent.com/littlexia4-creator/nativelink-deploy/main/install.sh | bash -s -- cas
 #
-#   # Deploy a worker pointing to a server
-#   curl -fsSL https://raw.githubusercontent.com/littlexia4-creator/nativelink-deploy/main/install.sh | bash -s -- worker <SERVER_IP>
+#   # Deploy a scheduler pointing at the CAS host
+#   curl -fsSL https://raw.githubusercontent.com/littlexia4-creator/nativelink-deploy/main/install.sh | bash -s -- scheduler <CAS_IP>
+#
+#   # Deploy a worker pointing at CAS and scheduler
+#   curl -fsSL https://raw.githubusercontent.com/littlexia4-creator/nativelink-deploy/main/install.sh | bash -s -- worker <CAS_IP> [SCHEDULER_IP]
 #
 # Options (via environment variables):
-#   DEPLOY_DIR        Install directory (default: ~/nativelink-server or ~/nativelink-worker)
-#   CAS_MAX_GB        CAS store size in GB (default: 500, server only)
-#   AC_MAX_GB         AC store size in GB (default: 10, server only)
+#   DEPLOY_DIR        Install directory (default: ~/nativelink-<type>)
+#   CAS_MAX_GB        CAS store size in GB (default: 500, cas only)
+#   AC_MAX_GB         AC store size in GB (default: 10, cas only)
 #   WORKER_CACHE_GB   Worker local cache in GB (default: 50, worker only)
 #   MAX_TASKS         Max concurrent tasks (default: auto-detect via nproc, worker only)
 #   RUST_LOG          Log level (default: warn)
@@ -24,13 +27,14 @@ REPO_BASE="https://raw.githubusercontent.com/littlexia4-creator/nativelink-deplo
 usage() {
     cat <<'EOF'
 Usage:
-  install.sh server                    Deploy CAS + Scheduler
-  install.sh worker <SERVER_IP>        Deploy worker connecting to SERVER_IP
+  install.sh cas                             Deploy CAS + AC store
+  install.sh scheduler <CAS_IP>              Deploy scheduler connecting to CAS_IP
+  install.sh worker <CAS_IP> [SCHEDULER_IP]  Deploy worker (SCHEDULER_IP defaults to CAS_IP)
 
 Environment variables:
-  DEPLOY_DIR=<path>        Install directory (default: ~/nativelink-server or ~/nativelink-worker)
-  CAS_MAX_GB=<num>         CAS store max size in GB (default: 500)
-  AC_MAX_GB=<num>          AC store max size in GB (default: 10)
+  DEPLOY_DIR=<path>        Install directory (default: ~/nativelink-<type>)
+  CAS_MAX_GB=<num>         CAS store max size in GB (default: 500, cas only)
+  AC_MAX_GB=<num>          AC store max size in GB (default: 10, cas only)
   WORKER_CACHE_GB=<num>    Worker local cache in GB (default: 30)
   MAX_TASKS=<num>          Max concurrent tasks (default: nproc)
   RUST_LOG=<level>         Log verbosity: error|warn|info|debug (default: warn)
@@ -39,25 +43,39 @@ EOF
 }
 
 INSTALL_TYPE="${1:-}"
-SERVER_IP="${2:-}"
+CAS_IP="${2:-}"
+SCHEDULER_IP="${3:-}"
 
 if [[ -z "$INSTALL_TYPE" ]]; then
     usage
 fi
 
-if [[ "$INSTALL_TYPE" != "server" && "$INSTALL_TYPE" != "worker" ]]; then
-    echo "Error: first argument must be 'server' or 'worker'"
-    usage
-fi
+case "$INSTALL_TYPE" in
+    cas|scheduler|worker) ;;
+    *)
+        echo "Error: first argument must be 'cas', 'scheduler' or 'worker'"
+        usage
+        ;;
+esac
 
-if [[ "$INSTALL_TYPE" == "worker" && -z "$SERVER_IP" ]]; then
-    echo "Error: worker mode requires SERVER_IP as second argument"
-    echo "  install.sh worker <SERVER_IP>"
+if [[ "$INSTALL_TYPE" == "scheduler" && -z "$CAS_IP" ]]; then
+    echo "Error: scheduler mode requires CAS_IP as second argument"
+    echo "  install.sh scheduler <CAS_IP>"
     exit 1
 fi
 
+if [[ "$INSTALL_TYPE" == "worker" ]]; then
+    if [[ -z "$CAS_IP" ]]; then
+        echo "Error: worker mode requires CAS_IP as second argument"
+        echo "  install.sh worker <CAS_IP> [SCHEDULER_IP]"
+        exit 1
+    fi
+    # Co-located deployments run the scheduler on the CAS host.
+    SCHEDULER_IP="${SCHEDULER_IP:-$CAS_IP}"
+fi
+
 if [[ $EUID -ne 0 ]]; then
-    echo "Error: run as root — the installer creates and mounts an XFS store."
+    echo "Error: run as root — the installer may create and mount an XFS store."
     echo "  sudo bash install.sh $*"
     exit 1
 fi
@@ -91,9 +109,10 @@ check_arch() {
 
 check_ports() {
     local ports=()
-    if [[ "$INSTALL_TYPE" == "server" ]]; then
-        ports=(50051 50052 50061)
-    fi
+    case "$INSTALL_TYPE" in
+        cas)       ports=(50051) ;;
+        scheduler) ports=(50052 50061) ;;
+    esac
     for port in "${ports[@]+"${ports[@]}"}"; do
         if ss -tlnp 2>/dev/null | grep -q ":${port} " || \
            netstat -tlnp 2>/dev/null | grep -q ":${port} "; then
@@ -106,7 +125,12 @@ check_ports() {
 
 echo "=== NativeLink Installer ==="
 echo "Type: $INSTALL_TYPE"
-[[ -n "$SERVER_IP" ]] && echo "Server: $SERVER_IP"
+if [[ "$INSTALL_TYPE" == "scheduler" ]]; then
+    echo "CAS: $CAS_IP"
+elif [[ "$INSTALL_TYPE" == "worker" ]]; then
+    echo "CAS: $CAS_IP"
+    echo "Scheduler: $SCHEDULER_IP"
+fi
 echo ""
 
 check_docker
@@ -272,27 +296,31 @@ setup_xfs_store() {
     echo "[ok] XFS store mounted: $mnt ($(df -h "$mnt" | awk 'NR==2 {print $2}') total)"
 }
 
-if [[ "$INSTALL_TYPE" == "server" ]]; then
+# The scheduler holds no persistent data (it proxies to CAS over gRPC),
+# so only cas and worker need an XFS store.
+if [[ "$INSTALL_TYPE" == "cas" ]]; then
     require_int CAS_MAX_GB "${CAS_MAX_GB:-500}"
     require_int AC_MAX_GB "${AC_MAX_GB:-10}"
     setup_xfs_store "$(( ${CAS_MAX_GB:-500} + ${AC_MAX_GB:-10} ))" 0
-else
+elif [[ "$INSTALL_TYPE" == "worker" ]]; then
     require_int WORKER_CACHE_GB "${WORKER_CACHE_GB:-50}"
     # +20 GB for the action work_directory scratch.
     setup_xfs_store "${WORKER_CACHE_GB:-50}" 20
 fi
 
-if [[ "$INSTALL_TYPE" == "server" ]]; then
-    download "$REPO_BASE/server/docker-compose.yml"     "docker-compose.yml"
-    download "$REPO_BASE/server/local-storage-cas.json5" "local-storage-cas.json5"
-    download "$REPO_BASE/server/scheduler.json5"         "scheduler.json5"
+if [[ "$INSTALL_TYPE" == "cas" ]]; then
+    download "$REPO_BASE/cas/docker-compose.yml"      "docker-compose.yml"
+    download "$REPO_BASE/cas/local-storage-cas.json5" "local-storage-cas.json5"
+elif [[ "$INSTALL_TYPE" == "scheduler" ]]; then
+    download "$REPO_BASE/scheduler/docker-compose.yml" "docker-compose.yml"
+    download "$REPO_BASE/scheduler/scheduler.json5"    "scheduler.json5"
 else
     download "$REPO_BASE/worker/docker-compose.yml" "docker-compose.yml"
     download "$REPO_BASE/worker/worker.json5"        "worker.json5"
 fi
 
 # ── Apply customizations ──────────────────────────────────────────────────
-apply_server_config() {
+apply_cas_config() {
     local cas_bytes ac_bytes
     cas_bytes=$(( ${CAS_MAX_GB:-500} * 1000000000 ))
     ac_bytes=$(( ${AC_MAX_GB:-10} * 1000000000 ))
@@ -319,9 +347,9 @@ apply_worker_config() {
     echo "[ok] Worker cache: ${worker_cache_gb} GB, max tasks: $max_tasks"
 }
 
-if [[ "$INSTALL_TYPE" == "server" ]]; then
-    apply_server_config
-else
+if [[ "$INSTALL_TYPE" == "cas" ]]; then
+    apply_cas_config
+elif [[ "$INSTALL_TYPE" == "worker" ]]; then
     apply_worker_config
 fi
 
@@ -329,13 +357,18 @@ fi
 create_env() {
     cat > .env <<ENVEOF
 RUST_LOG=${RUST_LOG:-warn}
-NATIVELINK_DIR=${NATIVELINK_DIR}
 ENVEOF
 
-    if [[ "$INSTALL_TYPE" == "worker" ]]; then
+    if [[ "$INSTALL_TYPE" == "cas" || "$INSTALL_TYPE" == "worker" ]]; then
+        echo "NATIVELINK_DIR=${NATIVELINK_DIR}" >> .env
+    fi
+
+    if [[ "$INSTALL_TYPE" == "scheduler" ]]; then
+        echo "CAS_ENDPOINT=${CAS_IP}" >> .env
+    elif [[ "$INSTALL_TYPE" == "worker" ]]; then
         cat >> .env <<ENVEOF
-CAS_ENDPOINT=${SERVER_IP}
-SCHEDULER_ENDPOINT=${SERVER_IP}
+CAS_ENDPOINT=${CAS_IP}
+SCHEDULER_ENDPOINT=${SCHEDULER_IP}
 ENVEOF
     fi
     echo "[ok] .env created"
@@ -375,6 +408,11 @@ docker compose ps
 echo ""
 echo "=== Resource Usage ==="
 docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" $(docker compose ps -q 2>/dev/null) 2>/dev/null || true
+SCRIPT
+
+# The scheduler has no local store — skip the store health section.
+if [[ "$INSTALL_TYPE" != "scheduler" ]]; then
+cat >> status.sh <<'SCRIPT'
 echo ""
 echo "=== Store ==="
 store_dir=$(sed -n 's/^NATIVELINK_DIR=//p' .env 2>/dev/null)
@@ -400,6 +438,7 @@ for d in content_path-cas/d data-worker-test/content_path-cas; do
     fi
 done
 SCRIPT
+fi
 chmod +x status.sh
 
 # ── Start ──────────────────────────────────────────────────────────────────
@@ -418,20 +457,27 @@ echo "  ./logs.sh      Follow logs"
 echo "  ./status.sh    Check status"
 echo ""
 
-if [[ "$INSTALL_TYPE" == "server" ]]; then
-    local_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "<this-server-ip>")
-    echo "Ports exposed:"
+if [[ "$INSTALL_TYPE" == "cas" ]]; then
+    local_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "<this-host-ip>")
+    echo "Port exposed:"
     echo "  50051  CAS / AC / ByteStream"
+    echo ""
+    echo "Next: deploy a scheduler pointing at this host:"
+    echo "  curl -fsSL $REPO_BASE/install.sh | bash -s -- scheduler $local_ip"
+elif [[ "$INSTALL_TYPE" == "scheduler" ]]; then
+    local_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "<this-host-ip>")
+    echo "Scheduler is connecting to CAS: $CAS_IP:50051"
+    echo "Ports exposed:"
     echo "  50052  Execution / Capabilities"
-    echo "  50061  Worker API (for remote workers)"
+    echo "  50061  Worker API (for workers)"
     echo ""
     echo "To add a worker on another machine:"
-    echo "  curl -fsSL $REPO_BASE/install.sh | bash -s -- worker $local_ip"
+    echo "  curl -fsSL $REPO_BASE/install.sh | bash -s -- worker $CAS_IP $local_ip"
 else
-    echo "Worker is connecting to: $SERVER_IP"
-    echo "  CAS:       $SERVER_IP:50051"
-    echo "  Scheduler: $SERVER_IP:50061"
+    echo "Worker is connecting to:"
+    echo "  CAS:       $CAS_IP:50051"
+    echo "  Scheduler: $SCHEDULER_IP:50061"
     echo ""
     echo "Verify connectivity:"
-    echo "  nc -zv $SERVER_IP 50051 && nc -zv $SERVER_IP 50061"
+    echo "  nc -zv $CAS_IP 50051 && nc -zv $SCHEDULER_IP 50061"
 fi
