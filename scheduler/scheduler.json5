@@ -1,5 +1,5 @@
 // NativeLink Scheduler
-// Proxies CAS/AC requests to the local CAS on port 50051.
+// Proxies CAS/AC requests to the CAS endpoint (CAS_ENDPOINT, host:port).
 // Worker API on port 50061, Execution API on port 50052.
 {
   stores: [
@@ -9,7 +9,7 @@
         instance_name: "",
         endpoints: [
           {
-            address: "grpc://${CAS_ENDPOINT:-127.0.0.1}:50051",
+            address: "grpc://${CAS_ENDPOINT:-127.0.0.1:50051}",
           },
         ],
         store_type: "cas",
@@ -26,7 +26,7 @@
             instance_name: "",
             endpoints: [
               {
-                address: "grpc://${CAS_ENDPOINT:-127.0.0.1}:50051",
+                address: "grpc://${CAS_ENDPOINT:-127.0.0.1:50051}",
               },
             ],
             store_type: "ac",

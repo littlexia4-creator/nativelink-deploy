@@ -74,6 +74,16 @@ if [[ "$INSTALL_TYPE" == "worker" ]]; then
     SCHEDULER_IP="${SCHEDULER_IP:-$CAS_IP}"
 fi
 
+# Endpoints are host[:port]; append the standard port when none is given.
+# Plain IPs keep the defaults (50051/50061); pass host:port for anything
+# else (e.g. an ingress on port 80).
+if [[ "$INSTALL_TYPE" == "scheduler" || "$INSTALL_TYPE" == "worker" ]]; then
+    [[ "$CAS_IP" == *:* ]] || CAS_IP="$CAS_IP:50051"
+fi
+if [[ "$INSTALL_TYPE" == "worker" ]]; then
+    [[ "$SCHEDULER_IP" == *:* ]] || SCHEDULER_IP="$SCHEDULER_IP:50061"
+fi
+
 if [[ $EUID -ne 0 ]]; then
     echo "Error: run as root — the installer may create and mount an XFS store."
     echo "  sudo bash install.sh $*"
@@ -466,7 +476,7 @@ if [[ "$INSTALL_TYPE" == "cas" ]]; then
     echo "  curl -fsSL $REPO_BASE/install.sh | bash -s -- scheduler $local_ip"
 elif [[ "$INSTALL_TYPE" == "scheduler" ]]; then
     local_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "<this-host-ip>")
-    echo "Scheduler is connecting to CAS: $CAS_IP:50051"
+    echo "Scheduler is connecting to CAS: $CAS_IP"
     echo "Ports exposed:"
     echo "  50052  Execution / Capabilities"
     echo "  50061  Worker API (for workers)"
@@ -475,9 +485,9 @@ elif [[ "$INSTALL_TYPE" == "scheduler" ]]; then
     echo "  curl -fsSL $REPO_BASE/install.sh | bash -s -- worker $CAS_IP $local_ip"
 else
     echo "Worker is connecting to:"
-    echo "  CAS:       $CAS_IP:50051"
-    echo "  Scheduler: $SCHEDULER_IP:50061"
+    echo "  CAS:       $CAS_IP"
+    echo "  Scheduler: $SCHEDULER_IP"
     echo ""
     echo "Verify connectivity:"
-    echo "  nc -zv $CAS_IP 50051 && nc -zv $SCHEDULER_IP 50061"
+    echo "  nc -zv ${CAS_IP%:*} ${CAS_IP##*:} && nc -zv ${SCHEDULER_IP%:*} ${SCHEDULER_IP##*:}"
 fi
