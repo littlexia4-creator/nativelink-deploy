@@ -22,13 +22,26 @@
       },
     },
     {
+      // completeness_checking verifies every output blob still exists in CAS
+      // before honoring an AC hit. Without it, an AC entry whose blob was
+      // evicted serves a "hit" that clients can never download — reclient
+      // hangs forever on the NotFound blob instead of re-executing the action.
       name: "AC_MAIN_STORE",
-      filesystem: {
-        content_path: "/root/.cache/nativelink/content_path-ac",
-        temp_path: "/root/.cache/nativelink/tmp_path-ac",
-        eviction_policy: {
-          // 10GB.
-          max_bytes: 10000000000,
+      completeness_checking: {
+        backend: {
+          filesystem: {
+            content_path: "/root/.cache/nativelink/content_path-ac",
+            temp_path: "/root/.cache/nativelink/tmp_path-ac",
+            eviction_policy: {
+              // 10GB.
+              max_bytes: 10000000000,
+            },
+          },
+        },
+        cas_store: {
+          ref_store: {
+            name: "CAS_MAIN_STORE",
+          },
         },
       },
     },
