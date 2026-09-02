@@ -148,26 +148,6 @@ check_arch
 check_ports
 
 # ── Download configs ───────────────────────────────────────────────────────
-github_raw_to_jsdelivr() {
-  local url="$1"
-  local owner repo branch file_path
-  local CDN_BASE="https://cdn.jsdelivr.net/gh"
-
-  # Check if the URL is from raw.githubusercontent.com
-  if [[ $url =~ ^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$ ]]; then
-    owner="${BASH_REMATCH[1]}"
-    repo="${BASH_REMATCH[2]}"
-    branch="${BASH_REMATCH[3]}"
-    file_path="${BASH_REMATCH[4]}" # This captures the full path including subdirectories
-
-    # Construct the jsDelivr URL
-    echo "$CDN_BASE/${owner}/${repo}@${branch}/${file_path}"
-  else
-    # If the URL doesn't match, return the original (or handle error)
-    return 1
-  fi
-}
-
 github_raw_to_proxy() {
   local raw_url="$1"
   local PROXY_BASE="https://ghproxy.net/"
@@ -193,9 +173,6 @@ download() {
     local url="$1" dest="$2"
     echo "  Downloading $dest ..."
     converted_url=$(github_raw_to_proxy "$url")
-    if [[ -z "$converted_url" ]]; then
-      converted_url=$(github_raw_to_jsdelivr "$url")
-    fi
 
     if [[ -z "$converted_url" ]]; then
       echo "Error: Unable to convert URL: $url"
