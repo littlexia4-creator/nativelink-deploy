@@ -75,7 +75,7 @@ For cas and worker, the installer puts the cache on an **XFS filesystem
 inside a preallocated loop file** (`$DEPLOY_DIR/cas-store.img`, mounted at
 `$DEPLOY_DIR/store`, persisted in `/etc/fstab` with `loop,nofail`). The
 scheduler holds no persistent data and needs no store. Do not point the
-store at a plain ext4 directory. Two production incidents motivate this:
+store at a plain ext4 directory. Three production incidents motivate this:
 
 1. **ext4 per-directory limit.** NativeLink's filesystem store keeps ALL
    blobs in one directory (`content_path-cas/d/`). ext4's htree caps a
@@ -87,9 +87,46 @@ store at a plain ext4 directory. Two production incidents motivate this:
    `fallocate`, never `truncate`: a sparse loop allocates extents on first
    write, which collapsed fsync throughput from ~225 MB/s to ~55 MB/s and
    stalled worker output uploads at 28–39 s per action.
+3. **Discards punch holes.** On a file-backed loop device, a discard is
+   implemented by punching holes in the backing file. `mkfs.xfs` issues a
+   device-wide discard **by default**, so the installer passes `-K`
+   (`mkfs.xfs -f -K`) — without it, a freshly `fallocate`d 1 GB img comes
+   out 11 MB allocated. Never run `fstrim` on the store mount for the
+   same reason. (A sparse img was measured at 45 ms per 4 KB write+fsync
+   vs ~15 ms once refilled.)
 
 After any host reboot, confirm the store remounted: `df -T` on
 `$DEPLOY_DIR/store` must show `xfs`. `./status.sh` warns if it did not.
+
+### Growing the store
+
+Grow the CAS quota when the store fills. The critical rule: extend the
+loop file with `fallocate`, never `truncate` or `dd` — a sparse extension
+leaves holes that the underlying filesystem allocates one block at a time
+*inside every fsync* (incident 2 above; measured 45 ms vs ~15 ms per 4 KB
+write+fsync on a production CAS, and small sync writes are exactly the
+blob-upload workload).
+
+From the CAS host, as root:
+
+```bash
+cd $DEPLOY_DIR
+docker compose down                                  # brief outage; workers retry
+fallocate -l 500G cas-store.img                      # fills holes AND extends, fully allocated
+losetup -c "$(losetup -j cas-store.img | cut -d: -f1)"   # loop re-reads the new size
+xfs_growfs ./store                                   # XFS picks up the new size
+# bump max_bytes in local-storage-cas.json5, then:
+docker compose up -d
+```
+
+`fallocate` reserves the full new size immediately, so check host disk
+free space first (quota × 1.1, as in Requirements). `./status.sh` warns
+if the backing file ever becomes sparse.
+
+If an existing store needs its holes filled (or the filesystem recreated),
+fill them with `fallocate --keep-size -l <img-size> <img>` while the
+container is stopped — and when recreating with `mkfs.xfs`, always pass
+`-K` (see incident 3 above). Do not run `fstrim` on the store.
 
 ## Management
 
@@ -101,8 +138,8 @@ cd /opt/nativelink    # or your DEPLOY_DIR
 ./stop.sh             # Stop services
 ./logs.sh             # Follow logs (pass service name to filter)
 ./status.sh           # Containers + resources + store health
-                        (warns if store is not XFS, not mounted, or if a
-                         single directory exceeds 6M entries)
+                        (warns if store is not XFS, not mounted, the backing
+                         file is sparse, or a single directory exceeds 6M entries)
 ```
 
 ## Architecture

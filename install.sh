@@ -273,7 +273,10 @@ setup_xfs_store() {
     fallocate -l "${loop_gb}G" "$img"
     local lo
     lo=$(losetup -f --show "$img")
-    mkfs.xfs -f "$lo" >/dev/null
+    # -K skips mkfs.xfs's device-wide discard: on a file-backed loop device
+    # a discard punches holes in the backing file, silently undoing the
+    # fallocate above (verified: 1G dense img -> 11M after mkfs without -K).
+    mkfs.xfs -f -K "$lo" >/dev/null
     mkdir -p "$mnt"
     mount "$lo" "$mnt"
     if ! grep -qsF "$img" /etc/fstab; then
@@ -413,6 +416,23 @@ fstype=$(df -T "$store_dir" 2>/dev/null | awk 'NR==2 {print $2}')
 if [[ -n "$fstype" && "$fstype" != "xfs" ]]; then
     echo "WARNING: store on '$fstype'. ext4 limits ONE directory to ~8-10M files;"
     echo "  NativeLink keeps all blobs in content_path-cas/d — use XFS (see install.sh)."
+fi
+# Sparse backing file: holes in the loop img get filled by the underlying
+# filesystem inside every fsync, collapsing small-write throughput.
+loop_dev=$(df "$store_dir" 2>/dev/null | awk 'NR==2 {print $1}')
+img=""
+if [[ "$loop_dev" == /dev/loop* ]]; then
+    img=$(cat "/sys/block/$(basename "$loop_dev")/loop/backing_file" 2>/dev/null)
+fi
+[[ -n "$img" && -f "$img" ]] || img="cas-store.img"
+if [[ -f "$img" ]]; then
+    apparent=$(stat -c %s "$img" 2>/dev/null)
+    allocated=$(du -B1 "$img" 2>/dev/null | awk '{print $1}')
+    if [[ -n "$apparent" && -n "$allocated" ]] && (( allocated * 100 < apparent * 99 )); then
+        echo "WARNING: $img is sparse: $((allocated/1000000000))G allocated of $((apparent/1000000000))G."
+        echo "  Holes allocate inside the fsync path — small sync writes slow down several-fold."
+        echo "  Fix: sudo fallocate --keep-size -l ${apparent} $img   (fills holes, no data touched)"
+    fi
 fi
 # The failure mode block/inode checks miss: per-directory entry count.
 for d in content_path-cas/d data-worker-test/content_path-cas; do
