@@ -43,7 +43,7 @@ sudo bash /tmp/nativelink-install.sh worker <CAS_IP> [SCHEDULER_IP]
 | Root | Installer mounts an XFS store and edits `/etc/fstab` |
 | Docker | Docker Engine + Compose v2 |
 | Network | TCP access to CAS port 50051 and scheduler port 50061 (scheduler/worker only) |
-| Disk | Free space ≥ store quota × 1.1 + 10 GB (the XFS loop file is **preallocated** up front) |
+| Disk | Free space ≥ (quota + headroom) × 1.1 + 10 GB — headroom is 0 for cas, 20 GB (work scratch) for worker; the XFS loop file is **preallocated** up front |
 
 ## Configuration
 
@@ -75,7 +75,7 @@ For cas and worker, the installer puts the cache on an **XFS filesystem
 inside a preallocated loop file** (`$DEPLOY_DIR/cas-store.img`, mounted at
 `$DEPLOY_DIR/store`, persisted in `/etc/fstab` with `loop,nofail`). The
 scheduler holds no persistent data and needs no store. Do not point the
-store at a plain ext4 directory. Three production incidents motivate this:
+store at a plain ext4 directory. Four production incidents motivate this:
 
 1. **ext4 per-directory limit.** NativeLink's filesystem store keeps ALL
    blobs in one directory (`content_path-cas/d/`). ext4's htree caps a
@@ -94,28 +94,36 @@ store at a plain ext4 directory. Three production incidents motivate this:
    out 11 MB allocated. Never run `fstrim` on the store mount for the
    same reason. (A sparse img was measured at 45 ms per 4 KB write+fsync
    vs ~15 ms once refilled.)
+4. **One img, two loop devices corrupts the filesystem.** Attaching the
+   same backing file to a second loop device (e.g. re-running the
+   installer over a stale attach from a crashed container) creates two
+   independent writers to one filesystem image; XFS corrupts and the
+   worker crash-loops. The installer refuses to run when `losetup -j`
+   shows the img already attached, and `status.sh` warns if a live store
+   ever ends up on multiple loops.
 
 After any host reboot, confirm the store remounted: `df -T` on
 `$DEPLOY_DIR/store` must show `xfs`. `./status.sh` warns if it did not.
 
 ### Growing the store
 
-Grow the CAS quota when the store fills. The critical rule: extend the
-loop file with `fallocate`, never `truncate` or `dd` — a sparse extension
-leaves holes that the underlying filesystem allocates one block at a time
-*inside every fsync* (incident 2 above; measured 45 ms vs ~15 ms per 4 KB
-write+fsync on a production CAS, and small sync writes are exactly the
-blob-upload workload).
+Grow the quota when the store fills — cas and worker hosts use the same
+loop layout, so the same procedure applies to both. The critical rule:
+extend the loop file with `fallocate`, never `truncate` or `dd` — a sparse
+extension leaves holes that the underlying filesystem allocates one block
+at a time *inside every fsync* (incident 2 above; measured 45 ms vs ~15 ms
+per 4 KB write+fsync on a production CAS, and small sync writes are
+exactly the blob-upload workload).
 
-From the CAS host, as root:
+From the cas or worker host, as root:
 
 ```bash
 cd $DEPLOY_DIR
-docker compose down                                  # brief outage; workers retry
+docker compose down                                  # brief outage; peers retry
 fallocate -l 500G cas-store.img                      # fills holes AND extends, fully allocated
 losetup -c "$(losetup -j cas-store.img | cut -d: -f1)"   # loop re-reads the new size
 xfs_growfs ./store                                   # XFS picks up the new size
-# bump max_bytes in local-storage-cas.json5, then:
+# bump max_bytes: local-storage-cas.json5 (cas) or worker.json5 (worker), then:
 docker compose up -d
 ```
 
@@ -127,6 +135,42 @@ If an existing store needs its holes filled (or the filesystem recreated),
 fill them with `fallocate --keep-size -l <img-size> <img>` while the
 container is stopped — and when recreating with `mkfs.xfs`, always pass
 `-K` (see incident 3 above). Do not run `fstrim` on the store.
+
+## Network tuning (BBR)
+
+Worker/scheduler ↔ CAS links typically cross IDCs (tens of ms RTT, 1–2%
+loss). The kernel default (cubic + pfifo_fast) collapses there — measured
+3–4 Mbps per stream with cwnd pinned at 4–11, which stalled worker output
+uploads at ~90 s per action. With `bbr` + `fq` the same path sustains
+250–600 Mbps per stream. The installer therefore applies and persists:
+
+- `/etc/sysctl.d/99-nativelink-network.conf`: `default_qdisc=fq`,
+  `tcp_congestion_control=bbr`, `tcp_rmem`/`tcp_wmem` max raised to 32 MB
+  (so the RTT×bandwidth product of a fat cross-IDC pipe is not the next
+  ceiling).
+- `tcp_bbr` in `/etc/modules-load.d/`, and `tc qdisc replace ... root fq`
+  on existing NICs (`default_qdisc` only covers interfaces created later).
+
+For an existing deployment, re-running `install.sh` applies this, or do it
+by hand:
+
+```bash
+sudo modprobe tcp_bbr
+sudo sysctl -w net.core.default_qdisc=fq net.ipv4.tcp_congestion_control=bbr
+sudo sysctl -w net.ipv4.tcp_rmem="4096 131072 33554432" net.ipv4.tcp_wmem="4096 16384 33554432"
+sudo tc qdisc replace dev <nic> root fq
+```
+
+Two caveats:
+
+- **Congestion control is fixed per socket at connect time.** Long-lived
+  gRPC connections keep cubic until they reconnect — restart the nativelink
+  container (on workers *and* on the CAS host) to cycle them onto bbr.
+- The worker template also sets `connections_per_endpoint: 8` (default 1)
+  so transfers aggregate over multiple TCP flows; combined with bbr this
+  took measured worker→CAS throughput from ~3 Mbps to hundreds of Mbps.
+
+`status.sh` warns when a host has drifted off bbr.
 
 ## Management
 

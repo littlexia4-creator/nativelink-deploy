@@ -13,6 +13,8 @@
             address: "grpc://${CAS_ENDPOINT:-127.0.0.1:50051}",
           },
         ],
+        // One lossy cross-IDC stream caps at a few Mbps; flows aggregate.
+        connections_per_endpoint: 8,
         store_type: "cas",
       },
     },
@@ -25,6 +27,7 @@
             address: "grpc://${CAS_ENDPOINT:-127.0.0.1:50051}",
           },
         ],
+        connections_per_endpoint: 8,
         store_type: "ac",
       },
     },

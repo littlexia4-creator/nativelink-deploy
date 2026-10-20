@@ -35,7 +35,7 @@ Environment variables:
   DEPLOY_DIR=<path>        Install directory (default: ~/nativelink-<type>)
   CAS_MAX_GB=<num>         CAS store max size in GB (default: 500, cas only)
   AC_MAX_GB=<num>          AC store max size in GB (default: 10, cas only)
-  WORKER_CACHE_GB=<num>    Worker local cache in GB (default: 30)
+  WORKER_CACHE_GB=<num>    Worker local cache in GB (default: 50)
   MAX_TASKS=<num>          Max concurrent tasks (default: nproc)
   RUST_LOG=<level>         Log verbosity: error|warn|info|debug (default: warn)
 EOF
@@ -143,9 +143,36 @@ elif [[ "$INSTALL_TYPE" == "worker" ]]; then
 fi
 echo ""
 
+# Cross-IDC links (scheduler/worker -> CAS) run tens of ms RTT with ~1-2%
+# loss. Stock cubic+pfifo_fast collapses there (measured 3-4 Mbps per
+# stream, cwnd pinned at 4-11); bbr+fq sustained 250-600 Mbps per stream
+# on the same path. Buffer caps go to 32MB so a 29ms BDP is not the next
+# ceiling. Persisted via sysctl.d + modules-load.d so reboots keep it.
+tune_network() {
+    local conf=/etc/sysctl.d/99-nativelink-network.conf
+    cat > "$conf" <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_rmem=4096 131072 33554432
+net.ipv4.tcp_wmem=4096 16384 33554432
+EOF
+    modprobe tcp_bbr 2>/dev/null || true
+    echo tcp_bbr > /etc/modules-load.d/tcp_bbr.conf
+    sysctl -p "$conf" >/dev/null
+    # default_qdisc only covers interfaces created later; fix current NICs.
+    if command -v tc &>/dev/null; then
+        local i
+        for i in $(ls /sys/class/net | grep -vE '^(lo|docker|veth|br-)'); do
+            tc qdisc replace dev "$i" root fq 2>/dev/null || true
+        done
+    fi
+    echo "[ok] Network: bbr+fq, 32MB tcp buffers (persisted: $conf)"
+}
+
 check_docker
 check_arch
 check_ports
+tune_network
 
 # ── Download configs ───────────────────────────────────────────────────────
 github_raw_to_proxy() {
@@ -247,6 +274,32 @@ setup_xfs_store() {
     local mnt="$DEPLOY_DIR/store"
 
     NATIVELINK_DIR="$mnt"
+
+    # One backing file must never sit on two loop devices: each loop accepts
+    # writes independently and the filesystem corrupts (seen in production
+    # after a re-run over a stale attach). Refuse instead of adding a loop.
+    if [[ -f "$img" ]]; then
+        local nloops
+        nloops=$(losetup -j "$img" | wc -l)
+        if (( nloops > 1 )); then
+            echo "Error: $img is attached to $nloops loop devices:"
+            losetup -j "$img"
+            echo "Multiple loops on one backing file corrupt the filesystem."
+            echo "Detach ALL of them (losetup -d <loopN>) and re-run."
+            exit 1
+        fi
+        if (( nloops == 1 )); then
+            if mountpoint -q "$mnt" 2>/dev/null \
+               && [[ "$(df -T "$mnt" | awk 'NR==2 {print $2}')" == "xfs" ]]; then
+                echo "[ok] XFS store already mounted at $mnt"
+                return
+            fi
+            echo "Error: $img is already attached to a loop device but $mnt is not a healthy XFS mount:"
+            losetup -j "$img"
+            echo "Fix: mount it, or detach (losetup -d <loopN>) and re-run to recreate the store."
+            exit 1
+        fi
+    fi
 
     # Idempotent: already set up and mounted?
     if [[ -f "$img" ]] && mountpoint -q "$mnt" 2>/dev/null \
@@ -398,6 +451,15 @@ docker compose ps
 echo ""
 echo "=== Resource Usage ==="
 docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" $(docker compose ps -q 2>/dev/null) 2>/dev/null || true
+echo ""
+echo "=== Network ==="
+cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+qd=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+echo "tcp_congestion_control=$cc default_qdisc=$qd"
+if [[ "$cc" != "bbr" ]]; then
+    echo "WARNING: not on bbr — cubic collapses to single-digit Mbps on lossy cross-IDC links."
+    echo "  Fix: sudo sysctl -p /etc/sysctl.d/99-nativelink-network.conf  (or re-run install.sh)"
+fi
 SCRIPT
 
 # The scheduler has no local store — skip the store health section.
@@ -425,6 +487,14 @@ if [[ "$loop_dev" == /dev/loop* ]]; then
     img=$(cat "/sys/block/$(basename "$loop_dev")/loop/backing_file" 2>/dev/null)
 fi
 [[ -n "$img" && -f "$img" ]] || img="cas-store.img"
+if [[ -f "$img" ]]; then
+    nloops=$(losetup -j "$img" 2>/dev/null | wc -l)
+    if (( nloops > 1 )); then
+        echo "WARNING: $img is attached to $nloops loop devices — this corrupts the fs:"
+        losetup -j "$img"
+        echo "  Fix: sudo losetup -d <extra loopN>  (keep the one mounted at $store_dir)"
+    fi
+fi
 if [[ -f "$img" ]]; then
     apparent=$(stat -c %s "$img" 2>/dev/null)
     allocated=$(du -B1 "$img" 2>/dev/null | awk '{print $1}')
